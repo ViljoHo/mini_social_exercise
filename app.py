@@ -869,7 +869,7 @@ def loop_color(user_id):
 
 # ----- Functions to be implemented are below
 
-# Task 3.1
+# Task 3.3
 def recommend(user_id, filter_following):
     """
     Args:
@@ -890,9 +890,70 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    recommended_posts = [] 
 
-    return recommended_posts;
+    # Get post where user has reacted
+    reacted_posts = query_db('SELECT DISTINCT post_id FROM reactions WHERE user_id = ?', (user_id,))
+    reacted_posts_ids = [row['post_id'] for row in reacted_posts] if reacted_posts else []
+    if not reacted_posts_ids:
+        return recommended_posts
+    
+    # Get contents of those posts
+    placeholders = ','.join(['?'] * len(reacted_posts_ids))
+    user_reacted_posts = query_db(f'SELECT content FROM posts WHERE id IN ({placeholders})', tuple(reacted_posts_ids))
+    user_reacted_content = " ".join([p['content'] for p in user_reacted_posts if p['content']])
+
+    # Find simple keywords
+    user_keywords = re.findall(r'\b[a-zA-Z]{3,}\b', user_reacted_content.lower())
+    user_profile = collections.Counter(user_keywords)
+
+    # Get all other posts insted reacted ones
+    placeholders = ','.join(['?'] * len(reacted_posts_ids))
+    other_posts = query_db(f'SELECT p.id, p.user_id, p.content, p.created_at, u.username FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id NOT IN ({placeholders})', tuple(reacted_posts_ids)) or []
+    #print(other_posts)
+
+    # other post if filter_following is True
+    if filter_following:
+        followed = query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))
+        followed_ids = [f['followed_id'] for f in followed] if followed else []
+        other_posts = [p for p in other_posts if p['user_id'] in followed_ids] 
+
+    # Compute simple similarity based on keyword overlap
+    def compute_similarity(post_content):
+        if not post_content:
+            return 0
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', post_content.lower())
+        words_count = collections.Counter(words)
+        overlap = sum(min(user_profile[w], words_count[w]) for w in words_count)
+        return overlap
+    
+    # Calculate similarity for each post
+    scored_posts = []
+    for post in other_posts:
+        score = compute_similarity(post['content'])
+        if score > 0:
+            scored_posts.append((post, score))
+
+    # Sort top 5 and put them in reverse-chronological order
+    scored_posts.sort(key=lambda x: x[1], reverse=True)
+    top_posts = [p[0] for p in scored_posts[:5]]
+
+    def parse_datetime(dt_str):
+        try:
+            return datetime.fromisoformat(dt_str)
+        except Exception:
+            # Handle common format differences
+            try:
+                return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+            except:
+                return datetime.min
+
+    top_posts.sort(key=lambda p: parse_datetime(p['created_at']), reverse=True)
+
+    recommended_posts = top_posts
+
+
+    return recommended_posts
 
 # Task 3.2
 def user_risk_analysis(user_id):
@@ -911,10 +972,111 @@ def user_risk_analysis(user_id):
     
     score = 0
 
-    return score;
+    # calculating users/account age first (Rule 2.1, setp 2), calculated here, because it is needed in several points
+    query_results = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    account_created_at = dict(query_results)['created_at']
+    account_age = (datetime.now() - account_created_at).days
+
+
+    # Rule 2.1
+    def individual_content_risk_score(content, age):
+        risk_score = 0
+        # Step 1
+        _, base_score = moderate_content(content)
+
+        # Step 3
+        if age < 7:
+            risk_score = base_score * 1.5
+        else:
+            risk_score = base_score
+        return risk_score
+    
+    def get_profile_text(user_id):
+        query_results = query_db('SELECT profile FROM users WHERE id = ?', (user_id,), one=True)
+        profile_text = dict(query_results)['profile']
+        return profile_text
+    
+    def get_all_posts(user_id):
+        query_results = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+        contents = [row['content'] for row in query_results]
+        #print(contents)
+        return contents
+    
+    def get_all_comments(user_id):
+        query_results = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+        contents = [row['content'] for row in query_results]
+        return contents
+
+    # Rule 2.2
+    # Step 1
+    profile_score = 0
+    profile_text = get_profile_text(user_id)
+    if profile_text:
+        profile_score = individual_content_risk_score(profile_text, account_age)
+        #print(profile_score)
+
+    # Step 2
+    average_post_score = 0
+    total_post_score = 0
+    all_posts_contents = get_all_posts(user_id)
+    if all_posts_contents:
+        for content in all_posts_contents:
+            _ , score = moderate_content(content)
+            total_post_score += score
+        average_post_score = total_post_score / len(all_posts_contents)
+
+
+    # Step 3
+    average_comment_score = 0
+    total_comment_score = 0
+    all_comments_contents = get_all_comments(user_id)
+    if all_comments_contents:
+        for content in all_comments_contents:
+            _ , score = moderate_content(content)
+            total_comment_score += score
+        average_comment_score = total_comment_score / len(all_comments_contents)
+
+    # Step 4
+
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    #print(f'content risk score: {content_risk_score}')
+
+    # Step 5
+    if account_age < 7:
+        score = content_risk_score * 1.5
+    elif account_age < 30:
+        score = content_risk_score * 1.2
+    else:
+        score = content_risk_score
+
+    #print(f'final risk score: {score}')
+
+    # Own rule
+    # The score will rise if user have done a lot posts and comments in 12 hours
+    query_results = query_db('SELECT count(*) FROM posts WHERE user_id = ? AND created_at >= datetime(\'now\', \'-1 day\')', (user_id,), one=True)
+    num_post_12h = query_results['count(*)']
+
+    query_results = query_db('SELECT count(*) FROM comments WHERE user_id = ? AND created_at >= datetime(\'now\', \'-1 day\')', (user_id,), one=True)
+    num_comments_12h = query_results['count(*)']
+
+    total_12h_activity = num_post_12h + num_comments_12h
+    
+    if total_12h_activity > 30:
+        score += 3
+    elif total_12h_activity > 15:
+        score += 1
+
+    # Printing to see top 5
+    # if score > 5:
+    #     print(f'score for user {user_id} is {score}')
+    # Rule 2.2 step 6
+    return min(score, 5.0)
+
+
 
     
-# Task 3.3
+# Task 3.1
 def moderate_content(content):
     """
     Args
@@ -932,8 +1094,99 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    # tier3_badword
     moderated_content = content
+    original_content = content
+    #print(original_content)
     score = 0
+
+    TIER1_PATTERN = r'\b(' + '|'.join(TIER1_WORDS) + r')\b'
+    TIER2_PATTERN = r'\b(' + '|'.join(TIER2_PHRASES) + r')\b'
+    TIER3_PATTERN = r'\b(' + '|'.join(TIER3_WORDS) + r')\b'
+    URL_PATTERN = r'\b(?:https?://|www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?\b'
+    FAKE_URL_PATTERN = r'\b(?:https?://|www\.)?[a-z0-9-]+(?:[\[\(]?\.[\]\)]?[a-z0-9-]+)+(?:/[^\s]*)?\b'
+
+    # Stage 1.1
+    
+    # Rule 1.1.1
+    tier1_matches = re.findall(TIER1_PATTERN, original_content, flags=re.IGNORECASE)
+
+    if len(tier1_matches) > 0:
+        moderated_content = "[content removed due to severe violation]"
+        score = 5.0
+        return moderated_content, score
+    
+    
+    # Rule 1.1.2
+    tier2_matches = re.findall(TIER2_PATTERN, original_content, flags=re.IGNORECASE)
+
+    if len(tier2_matches) > 0:
+        moderated_content = "[content removed due to spam/scam policy]"
+        score = 5.0
+        return moderated_content, score
+
+    # Stage 1.2
+    # Rule 1.2.1
+
+    # Run the regex to find all the matching words
+    tier3_matches = re.findall(TIER3_PATTERN, original_content, flags=re.IGNORECASE)
+
+    if len(tier3_matches) > 0:
+        score = len(tier3_matches) * 2
+        # Using the same regex, we replace all words with *
+        moderated_content = re.sub(TIER3_PATTERN, lambda m: '*' * len(m.group(0)), original_content, flags=re.IGNORECASE)
+
+    # Rule 1.2.2
+    url_matches = re.findall(URL_PATTERN, original_content, flags=re.IGNORECASE)
+
+    if len(url_matches) > 0:
+        score = len(url_matches) * 2
+        moderated_content = re.sub(URL_PATTERN, '[link removed]', moderated_content, flags=re.IGNORECASE)
+
+    # Rule 1.2.3
+    letters = re.findall(r'[A-Za-a]', original_content)
+    
+    if len(letters) > 0:
+        uppercases = sum(1 for c in letters if c.isupper())
+        uppercase_ratio = uppercases / len(letters)
+
+        if len(letters) > 15 and uppercase_ratio > 0.7:
+            score += 0.5
+
+    # Own rulees
+    # Also banned words in hashtags are taken account
+    
+
+    hashtags = re.findall(r'#\w+', original_content.lower())
+    for tag in hashtags:
+        tag_clean = tag.lstrip('#')
+        # remove non-letters/numbers for loose matching
+        tag_clean = re.sub(r'[^a-z0-9]', '', tag_clean)
+
+        #check tier 1 words
+        for word in TIER1_WORDS:
+            if word.lower() in tag_clean:
+                moderated_content = "[content removed due to severe violation]"
+                score = 5.0
+                return moderated_content, score
+
+        # check tier 2 phrases
+        for phrase in TIER2_PHRASES:
+            phrase_clean = re.sub(r'\s+', '', phrase.lower())
+            if phrase_clean in tag_clean:
+                moderated_content = "[content removed due to spam/scam policy]"
+                score = 5.0
+                return moderated_content, score
+            
+        # check tier 3 words
+            
+    # Aslo fake URLs are removed.
+    fake_url_matches = re.findall(FAKE_URL_PATTERN, original_content, flags=re.IGNORECASE)
+
+    if len(fake_url_matches) > 0:
+        score = len(url_matches) * 3
+        moderated_content = re.sub(FAKE_URL_PATTERN, '[fake link removed]', moderated_content, flags=re.IGNORECASE)
+
     
     return moderated_content, score
 
