@@ -856,6 +856,64 @@ def admin_delete_comment(comment_id):
 def rules():
     return render_template('rules.html.j2')
 
+@app.route('/users')
+def users_page():
+    """Includes two features. Simple user search and suggested users (based on mutual friends)"""
+
+    search_query = request.args.get('q', '').strip()
+    current_user_id = session.get('user_id', 1)
+
+    # Search users based on query
+    if search_query:
+        users = query_db("""
+            SELECT id, username, profile, created_at 
+            FROM users
+            WHERE username LIKE ?
+            ORDER BY username ASC
+        """, [f"%{search_query}%"])
+    else:
+        users = []
+
+    # Get suggested users based on mutual friends
+    user_follows = query_db("SELECT followed_id FROM follows WHERE follower_id = ?", [current_user_id])
+    followed_ids = [u['followed_id'] for u in user_follows]
+
+    if not followed_ids:
+        # Current user follows nobody yet
+        suggested_users = []
+        mutual_friend_info = None
+    else:
+        # Find users who share mutual friends
+        # The logic:
+        # 1. Find users followed by those that current user follows.
+        # 2. Exclude self and already followed.
+        suggested_users = query_db(f"""
+            SELECT u.id, u.username, u.profile, COUNT(*) AS mutual_count
+            FROM follows f
+            JOIN follows mf ON f.followed_id = mf.follower_id
+            JOIN users u ON mf.followed_id = u.id
+            WHERE f.follower_id = ?
+              AND u.id != ?
+              AND u.id NOT IN ({','.join(['?'] * len(followed_ids))})
+            GROUP BY u.id
+            ORDER BY mutual_count DESC
+            LIMIT 5
+        """, [current_user_id, current_user_id, *followed_ids])
+
+        mutual_friend_info = True if suggested_users else False
+
+    return render_template(
+        'users.html.j2',
+        search_query=search_query,
+        users=users,
+        suggested_users=suggested_users,
+        mutual_friend_info=mutual_friend_info,
+        follows_count=len(followed_ids)
+    )
+
+
+
+
 @app.template_global()
 def loop_color(user_id):
     # Generate a pastel color based on user_id hash

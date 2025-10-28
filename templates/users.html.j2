@@ -1,0 +1,57 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="container mt-5">
+  <h1>Users</h1>
+
+  <!-- Search form -->
+  <form method="get" action="{{ url_for('users_page') }}" class="my-4">
+    <div class="input-group">
+      <input type="text" name="q" class="form-control" placeholder="Search users..."
+             value="{{ search_query or '' }}">
+      <button class="btn btn-primary skeuo" type="submit">Search</button>
+    </div>
+  </form>
+
+  <!-- Suggested users -->
+  <div class="mt-4">
+    <h4>Suggested users:</h4>
+
+    {% if follows_count == 0 %}
+      <p class="text-muted">You are not following anyone yet, so there are no suggestions.</p>
+    {% elif not mutual_friend_info %}
+      <p class="text-muted">No mutual friends found yet.</p>
+    {% else %}
+      <div class="row">
+        {% for user in suggested_users %}
+        <div class="col-md-4">
+          <div class="card skeuo mb-3 p-3">
+            <h5><a href="{{ url_for('user_profile', username=user.username) }}">{{ user.username }}</a></h5>
+            <p>{{ user.profile or 'No profile description.' }}</p>
+            <p class="text-muted small">{{ user.mutual_count }} of the users you follow are following this user</p>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Search results -->
+  {% if search_query %}
+  <div class="mt-5">
+    <h4>Search results for “{{ search_query }}”</h4>
+    {% if not users %}
+      <p class="text-muted">No users found.</p>
+    {% else %}
+      <ul class="list-group">
+        {% for user in users %}
+        <li class="list-group-item skeuo">
+          <strong><a href="{{ url_for('user_profile', username=user.username) }}">{{ user.username }}</a></strong><br>
+          <small>{{ user.profile or 'No profile text.' }}</small>
+        </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
